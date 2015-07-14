@@ -24,9 +24,9 @@ func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 	chs := make([]chan *dns.Msg, len(dnsServers))
 	for i := range dnsServers {
 		chs[i] = make(chan *dns.Msg, 1)
-		go func(ch chan *dns.Msg) {
-			ch <- tryProxy(r, dnsServers[i])
-		}(chs[i])
+		go func(ch chan *dns.Msg, addr string) {
+			ch <- tryProxy(r, addr)
+		}(chs[i], dnsServers[i])
 	}
 
 	var m *dns.Msg
