@@ -30,7 +30,15 @@ non-empty answer section. If so that is returned, otherwise the server at
 `8.8.8.8:53` will be checked. The order of checking is always in the order the
 `--fwd-to` parameters are specified.
 
-In reality struggledns will make a dns request for every `--fwd-to` at the same
-time, for every incoming request. It then checks responses in order. This way
-there's not much of a speed penalty, at the cost of more bandwidth and more hits
-to the remote servers.
+### Groups
+
+    struggledns --fwd-to 10.0.0.5:53,8.8.8.8:53 --fwd-to 10.0.0.6:53,8.8.4.4:53
+
+Each `--fwd-to` can be a group of comma-delimited addresses to query in
+parallel. Every address in a group is queried in parallel and groups are queried
+in serial unless `--parallel` is specified, which causes **all** sent addresses
+from all groups to be queried in parallel. The response still respects the order
+of the addresses despite being sent in parallel. In the above example, when a
+query is received it will be first sent to both `10.0.0.5:53` and `8.8.8.8:53`
+and if both of those fail then it will make a request to both `10.0.0.6:53` and
+`8.8.4.4:53`.
