@@ -1,12 +1,12 @@
 package main
 
 import (
-	"log"
-
-	"github.com/mediocregopher/lever"
-	"github.com/miekg/dns"
 	"strings"
 	"time"
+
+	"github.com/levenlabs/go-llog"
+	"github.com/mediocregopher/lever"
+	"github.com/miekg/dns"
 )
 
 var dnsServerGroups [][]string
@@ -15,7 +15,7 @@ var client dns.Client
 func tryProxy(m *dns.Msg, addr string) *dns.Msg {
 	aM, _, err := client.Exchange(m, addr)
 	if err != nil {
-		log.Printf("forwarding to %s got err: %s", addr, err)
+		llog.Error("forwarding error in tryProxy", llog.KV{"addr": addr, "err": err})
 		return nil
 	} else if len(aM.Answer) == 0 {
 		return nil
@@ -42,6 +42,7 @@ func queryServers(r *dns.Msg, servers []string) *dns.Msg {
 }
 
 func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
+	llog.Info("handling request", llog.KV{"question": r.Question[0].Name})
 	var m *dns.Msg
 	for i := range dnsServerGroups {
 		m = queryServers(r, dnsServerGroups[i])
@@ -50,6 +51,7 @@ func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 		}
 	}
 	if m == nil {
+		llog.Warn("answer to request not found", llog.KV{"question": r.Question[0].Name})
 		dns.HandleFailed(w, r)
 		return
 	}
@@ -79,12 +81,20 @@ func main() {
 		Description: "Timeout in milliseconds for each request",
 		Default:     "300",
 	})
+	l.Add(lever.Param{
+		Name:        "--log-level",
+		Description: "Minimum log level to show, either debug, info, warn, error, or fatal",
+		Default:     "info",
+	})
 	l.Parse()
 
 	addr, _ := l.ParamStr("--listen-addr")
 	dnsServers, _ := l.ParamStrs("--fwd-to")
 	combineGroups := l.ParamFlag("--parallel")
 	timeout, _ := l.ParamInt("--timeout")
+
+	logLevel, _ := l.ParamStr("--log-level")
+	llog.SetLevelFromString(logLevel)
 
 	if combineGroups {
 		//combine all the servers sent into one group
@@ -111,12 +121,14 @@ func main() {
 
 	handler := dns.HandlerFunc(handleRequest)
 	go func() {
-		log.Printf("Listening on %s (udp)", addr)
-		log.Fatal(dns.ListenAndServe(addr, "udp", handler))
+		llog.Info("listening on udp", llog.KV{"addr": addr})
+		err := dns.ListenAndServe(addr, "udp", handler)
+		llog.Fatal("error listening on udp", llog.KV{"err": err})
 	}()
 	go func() {
-		log.Printf("Listening on %s (tcp)", addr)
-		log.Fatal(dns.ListenAndServe(addr, "tcp", handler))
+		llog.Info("listening on tcp", llog.KV{"addr": addr})
+		err := dns.ListenAndServe(addr, "tcp", handler)
+		llog.Fatal("error listening on tcp", llog.KV{"err": err})
 	}()
 
 	select {}
