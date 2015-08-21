@@ -6,12 +6,14 @@ import (
 	"github.com/mediocregopher/lever"
 	"github.com/miekg/dns"
 	"strings"
+	"time"
 )
 
 var dnsServerGroups [][]string
+var client dns.Client
 
 func tryProxy(m *dns.Msg, addr string) *dns.Msg {
-	aM, err := dns.Exchange(m, addr)
+	aM, _, err := client.Exchange(m, addr)
 	if err != nil {
 		log.Printf("forwarding to %s got err: %s", addr, err)
 		return nil
@@ -72,11 +74,17 @@ func main() {
 		Description: "If sent the query will be sent to all addresses in parallel",
 		Flag:        true,
 	})
+	l.Add(lever.Param{
+		Name:        "--timeout",
+		Description: "Timeout in milliseconds for each request",
+		Default:     "300",
+	})
 	l.Parse()
 
 	addr, _ := l.ParamStr("--listen-addr")
 	dnsServers, _ := l.ParamStrs("--fwd-to")
 	combineGroups := l.ParamFlag("--parallel")
+	timeout, _ := l.ParamInt("--timeout")
 
 	if combineGroups {
 		//combine all the servers sent into one group
@@ -91,6 +99,14 @@ func main() {
 		for i := range dnsServers {
 			dnsServerGroups[i] = strings.Split(dnsServers[i], ",")
 		}
+	}
+
+	client = dns.Client{
+		//since this is UDP, the Dial/Write timeouts don't mean much
+		//we really only care about setting the read
+		DialTimeout:  time.Millisecond * 100,
+		WriteTimeout: time.Millisecond * 100,
+		ReadTimeout:  time.Millisecond * time.Duration(timeout),
 	}
 
 	handler := dns.HandlerFunc(handleRequest)
