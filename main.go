@@ -12,18 +12,35 @@ import (
 var dnsServerGroups [][]string
 var client dns.Client
 
+type NewReq struct {
+	Msg     *dns.Msg
+	ReplyCh chan *dns.Msg
+}
+
+type RespReq struct {
+	OrigMsg *dns.Msg
+	Reply   *dns.Msg
+}
+
+var newCh = make(chan NewReq)
+var respCh = make(chan RespReq)
+
+//need to use init and not main for main_test.go
+func init() {
+	go reqSpin()
+}
+
+//Note: check len(msg.Answer) to make sure the response from this actually has an answer
 func tryProxy(m *dns.Msg, addr string) *dns.Msg {
 	aM, _, err := client.Exchange(m, addr)
 	if err != nil {
 		llog.Error("forwarding error in tryProxy", llog.KV{"addr": addr, "err": err})
 		return nil
-	} else if len(aM.Answer) == 0 {
-		return nil
 	}
 	return aM
 }
 
-func queryServers(r *dns.Msg, servers []string) *dns.Msg {
+func queryGroup(r *dns.Msg, servers []string) *dns.Msg {
 	chs := make([]chan *dns.Msg, len(servers))
 	for i := range servers {
 		chs[i] = make(chan *dns.Msg, 1)
@@ -34,33 +51,47 @@ func queryServers(r *dns.Msg, servers []string) *dns.Msg {
 
 	var m *dns.Msg
 	for i := range servers {
-		if m = <-chs[i]; m != nil {
+		if m = <-chs[i]; m != nil && len(m.Answer) > 0 {
 			break
 		}
 	}
 	return m
 }
 
-func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
-	llog.Info("handling request", llog.KV{"question": r.Question[0].Name})
+func queryAllGroups(r *dns.Msg) {
 	var m *dns.Msg
 	for i := range dnsServerGroups {
-		m = queryServers(r, dnsServerGroups[i])
-		if m != nil {
+		m = queryGroup(r, dnsServerGroups[i])
+		if m != nil && len(m.Answer) > 0 {
 			break
 		}
 	}
+	respCh <- RespReq{r, m}
+}
+
+func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
+	kv := llog.KV{"question": "", "type": ""}
+	var m *dns.Msg
+	if len(r.Question) > 0 {
+		kv["type"], _ = dns.TypeToString[r.Question[0].Qtype]
+		kv["question"] = r.Question[0].Name
+		llog.Info("handling request", kv)
+		rr := NewReq{r, make(chan *dns.Msg)}
+		newCh <- rr
+		m = <-rr.ReplyCh
+	}
 	if m == nil {
-		llog.Warn("answer to request not found", llog.KV{"question": r.Question[0].Name})
+		llog.Info("error handling request", kv)
 		dns.HandleFailed(w, r)
 		return
 	}
-	m.SetReply(r)
+	kv["rcode"], _ = dns.RcodeToString[m.Rcode]
+	llog.Info("responding to request", kv)
+	//do not call SetReply since m is already a reply for r
 	w.WriteMsg(m)
 }
 
 func main() {
-
 	l := lever.New("struggledns", nil)
 	l.Add(lever.Param{
 		Name:        "--listen-addr",
@@ -84,7 +115,7 @@ func main() {
 	l.Add(lever.Param{
 		Name:        "--log-level",
 		Description: "Minimum log level to show, either debug, info, warn, error, or fatal",
-		Default:     "info",
+		Default:     "warn",
 	})
 	l.Parse()
 
@@ -132,4 +163,47 @@ func main() {
 	}()
 
 	select {}
+}
+
+func getQuestionKey(q dns.Question) string {
+	t := "nop"
+	if t1, ok := dns.TypeToString[q.Qtype]; ok {
+		t = t1
+	}
+	c := "nop"
+	if c1, ok := dns.ClassToString[q.Qclass]; ok {
+		c = c1
+	}
+	n := q.Name
+	return n + t + c
+}
+
+func getMsgKey(r *dns.Msg) string {
+	k := ""
+	for _, q := range r.Question {
+		k += getQuestionKey(q)
+	}
+	return k
+}
+
+func reqSpin() {
+	var k string
+	inFlight := make(map[string][]chan *dns.Msg)
+	for {
+		select {
+		case r := <-newCh:
+			k = getMsgKey(r.Msg)
+			_, ok := inFlight[k]
+			inFlight[k] = append(inFlight[k], r.ReplyCh)
+			if !ok {
+				go queryAllGroups(r.Msg)
+			}
+		case r := <-respCh:
+			k = getMsgKey(r.OrigMsg)
+			for _, ch := range inFlight[k] {
+				ch <- r.Reply
+			}
+			delete(inFlight, k)
+		}
+	}
 }
