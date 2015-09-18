@@ -10,6 +10,7 @@ import (
 )
 
 var testDomain = "a-test.mysuperfancyapi.com."
+var testAnyDomain = "any-test.mysuperfancyapi.com."
 
 func init() {
 	dnsServerGroups = [][]string{[]string{"8.8.8.8:53"}}
@@ -108,5 +109,35 @@ func TestInFlight(t *T) {
 	require.Equal(t, dns.RcodeSuccess, r1.Rcode)
 	require.Len(t, r1.Answer, 1)
 	assert.Equal(t, r2.Rcode, r2.Rcode)
-	assert.Equal(t, r1.Answer, r2.Answer)
+	assert.Equal(t, r1.Answer[0], r2.Answer[0])
+	assert.Equal(t, m1.Id, r1.Id)
+	assert.Equal(t, m2.Id, r2.Id)
+}
+
+func TestInFlightAAAAAndA(t *T) {
+	m1 := new(dns.Msg)
+	m1.SetQuestion(testAnyDomain, dns.TypeAAAA)
+	w1 := getWriter()
+
+	m2 := new(dns.Msg)
+	m2.SetQuestion(testAnyDomain, dns.TypeA)
+	w2 := getWriter()
+
+	go func() {
+		handleRequest(w1, m1)
+	}()
+	go func() {
+		handleRequest(w2, m2)
+	}()
+	var r1 *dns.Msg
+	var r2 *dns.Msg
+	for r1 == nil || r2 == nil {
+		select {
+		case r1 = <-w1.ReplyCh:
+		case r2 = <-w2.ReplyCh:
+		}
+	}
+	require.Len(t, r1.Answer, 1)
+	require.Len(t, r2.Answer, 1)
+	assert.NotEqual(t, r1.Answer[0], r2.Answer[0])
 }

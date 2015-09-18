@@ -86,7 +86,17 @@ func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 	kv["rcode"], _ = dns.RcodeToString[m.Rcode]
+	if len(m.Answer) > 0 {
+		kv["answer"] = m.Answer[0]
+	}
 	llog.Info("responding to request", kv)
+	//we need to make sure the ID matches the replied one
+	if m.Id != r.Id {
+		//since it doesn't match, copy the struct and replace the ID
+		m2 := *m
+		m2.Id = r.Id
+		m = &m2
+	}
 	//do not call SetReply since m is already a reply for r
 	w.WriteMsg(m)
 }
