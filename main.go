@@ -34,7 +34,7 @@ func init() {
 func tryProxy(m *dns.Msg, addr string) *dns.Msg {
 	aM, _, err := client.Exchange(m, addr)
 	if err != nil {
-		llog.Error("forwarding error in tryProxy", llog.KV{"addr": addr, "err": err})
+		llog.Warn("forwarding error in tryProxy", llog.KV{"addr": addr, "err": err})
 		return nil
 	}
 	return aM
