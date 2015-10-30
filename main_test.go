@@ -188,7 +188,6 @@ func TestInFlightEDns0(t *T) {
 		case r2 = <-w2.ReplyCh:
 		}
 	}
-	assert.Equal(t, r1.Answer[0], r2.Answer[0])
 	//note: this test could be flaky since we're relying on google to return
 	//edns0 response when we send one vs when we don't send one
 	assert.NotNil(t, r1.IsEdns0())

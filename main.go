@@ -112,12 +112,10 @@ func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 
 	//we need to make sure the sent ID matches the replied one
 	//it might be different if we combined in-flight messages
-	if m.Id != r.Id {
-		//since it doesn't match, copy the struct and replace the ID
-		m2 := *m
-		m2.Id = r.Id
-		m = &m2
-	}
+	//copy the struct so we don't affect anything else handling this
+	m2 := *m
+	m2.Id = r.Id
+	m = &m2
 
 	//we always want to compress since there's no downsides afaik
 	m.Compress = true
