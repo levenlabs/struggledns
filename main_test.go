@@ -31,6 +31,9 @@ func (w *Writer) WriteMsg(r *dns.Msg) error {
 	return nil
 }
 func (w *Writer) Write(b []byte) (i int, err error) {
+	r := new(dns.Msg)
+	err = r.Unpack(b)
+	w.ReplyCh <- r
 	return
 }
 func (w *Writer) Close() error {
@@ -81,6 +84,25 @@ func TestNXDOMAIN(t *T) {
 	}()
 	r1 := <-w1.ReplyCh
 	assert.Equal(t, dns.RcodeNameError, r1.Rcode)
+}
+
+func TestFORMERR(t *T) {
+	m1 := new(dns.Msg)
+	w1 := getWriter()
+	go func() {
+		handleRequest(w1, m1)
+	}()
+	r1 := <-w1.ReplyCh
+	assert.Equal(t, dns.RcodeFormatError, r1.Rcode)
+
+	m1 = new(dns.Msg)
+	m1.SetQuestion(testDomain, dns.TypeNone)
+	w1 = getWriter()
+	go func() {
+		handleRequest(w1, m1)
+	}()
+	r1 = <-w1.ReplyCh
+	assert.Equal(t, dns.RcodeFormatError, r1.Rcode)
 }
 
 func TestInFlight(t *T) {
@@ -140,4 +162,35 @@ func TestInFlightAAAAAndA(t *T) {
 	require.Len(t, r1.Answer, 1)
 	require.Len(t, r2.Answer, 1)
 	assert.NotEqual(t, r1.Answer[0], r2.Answer[0])
+}
+
+func TestInFlightEDns0(t *T) {
+	m1 := new(dns.Msg)
+	m1.SetQuestion(testAnyDomain, dns.TypeA)
+	m1.SetEdns0(4096, false)
+	w1 := getWriter()
+
+	m2 := new(dns.Msg)
+	m2.SetQuestion(testAnyDomain, dns.TypeA)
+	w2 := getWriter()
+
+	go func() {
+		handleRequest(w1, m1)
+	}()
+	go func() {
+		handleRequest(w2, m2)
+	}()
+	var r1 *dns.Msg
+	var r2 *dns.Msg
+	for r1 == nil || r2 == nil {
+		select {
+		case r1 = <-w1.ReplyCh:
+		case r2 = <-w2.ReplyCh:
+		}
+	}
+	assert.Equal(t, r1.Answer[0], r2.Answer[0])
+	//note: this test could be flaky since we're relying on google to return
+	//edns0 response when we send one vs when we don't send one
+	assert.NotNil(t, r1.IsEdns0())
+	assert.Nil(t, r2.IsEdns0())
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/levenlabs/go-llog"
 	"github.com/mediocregopher/lever"
 	"github.com/miekg/dns"
+	"strconv"
 )
 
 var dnsServerGroups [][]string
@@ -32,11 +33,17 @@ func init() {
 
 //Note: check len(msg.Answer) to make sure the response from this actually has an answer
 func tryProxy(m *dns.Msg, addr string) *dns.Msg {
+	kv := llog.KV{"addr": addr, "query": m.Question[0].Name}
+	llog.Debug("calling exchange", kv)
 	aM, _, err := client.Exchange(m, addr)
 	if err != nil {
-		llog.Warn("forwarding error in tryProxy", llog.KV{"addr": addr, "err": err})
+		kv["err"] = err
+		llog.Warn("forwarding error in tryProxy", kv)
 		return nil
 	}
+	kv["rcode"] = aM.Rcode
+	kv["answerCnt"] = len(aM.Answer)
+	llog.Debug("exchange response", kv)
 	return aM
 }
 
@@ -69,36 +76,66 @@ func queryAllGroups(r *dns.Msg) {
 	respCh <- RespReq{r, m}
 }
 
+func sendFormatError(w dns.ResponseWriter, r *dns.Msg) {
+	m := new(dns.Msg)
+	m.SetRcode(r, dns.RcodeFormatError)
+	w.WriteMsg(m) //ignore write error
+	return
+}
+
 func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 	kv := llog.KV{"question": "", "type": ""}
-	var m *dns.Msg
-	if len(r.Question) > 0 {
-		kv["type"], _ = dns.TypeToString[r.Question[0].Qtype]
-		kv["question"] = r.Question[0].Name
-		llog.Info("handling request", kv)
-		rr := NewReq{r, make(chan *dns.Msg)}
-		newCh <- rr
-		m = <-rr.ReplyCh
+	var ok bool
+	if len(r.Question) == 0 {
+		llog.Warn("received request with no questions", kv)
+		sendFormatError(w, r)
+		return
 	}
+	kv["type"], ok = dns.TypeToString[r.Question[0].Qtype]
+	if !ok || kv["type"] == "None" {
+		kv["qtype"] = r.Question[0].Qtype
+		llog.Warn("invalid type received", kv)
+		sendFormatError(w, r)
+		return
+	}
+	kv["question"] = r.Question[0].Name
+
+	llog.Info("handling request", kv)
+	rr := NewReq{r, make(chan *dns.Msg)}
+	newCh <- rr
+	m := <-rr.ReplyCh
 	if m == nil {
-		llog.Info("error handling request", kv)
+		llog.Warn("error handling request", kv)
 		dns.HandleFailed(w, r)
 		return
 	}
-	kv["rcode"], _ = dns.RcodeToString[m.Rcode]
-	if len(m.Answer) > 0 {
-		kv["answer"] = m.Answer[0]
-	}
-	llog.Info("responding to request", kv)
-	//we need to make sure the ID matches the replied one
+
+	//we need to make sure the sent ID matches the replied one
+	//it might be different if we combined in-flight messages
 	if m.Id != r.Id {
 		//since it doesn't match, copy the struct and replace the ID
 		m2 := *m
 		m2.Id = r.Id
 		m = &m2
 	}
-	//do not call SetReply since m is already a reply for r
-	w.WriteMsg(m)
+
+	//we always want to compress since there's no downsides afaik
+	m.Compress = true
+
+	kv["rcode"], _ = dns.RcodeToString[m.Rcode]
+	if len(m.Answer) > 0 {
+		kv["answer"] = m.Answer[0]
+		kv["answerCnt"] = len(m.Answer)
+	}
+	kv["len"] = m.Len()
+	llog.Info("responding to request", kv)
+
+	err := w.WriteMsg(m)
+	if err != nil {
+		kv["err"] = err
+		llog.Warn("error writing response", kv)
+		//no need to handle HandleFailed here because we cannot write
+	}
 }
 
 func main() {
@@ -158,6 +195,9 @@ func main() {
 		DialTimeout:  time.Millisecond * 100,
 		WriteTimeout: time.Millisecond * 100,
 		ReadTimeout:  time.Millisecond * time.Duration(timeout),
+		//this won't do anything until https://github.com/miekg/dns/pull/281
+		//is merged since anything over 4096 is going to be truncated
+		//UDPSize: 4096,
 	}
 
 	handler := dns.HandlerFunc(handleRequest)
@@ -193,6 +233,17 @@ func getMsgKey(r *dns.Msg) string {
 	for _, q := range r.Question {
 		k += getQuestionKey(q)
 	}
+
+	//RFC 1035 defines this as the max
+	//since some clients (read: go) don't support edns0, this is the default
+	//if they do send edns0 we'll raise it to what they sent
+	limit := dns.MinMsgSize
+	opt := r.IsEdns0()
+	if opt != nil {
+		limit = int(opt.UDPSize())
+		llog.Debug("received edns0 limit", llog.KV{"limit": limit})
+	}
+	k += strconv.Itoa(limit)
 	return k
 }
 
