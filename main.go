@@ -12,6 +12,7 @@ import (
 
 var dnsServerGroups [][]string
 var client dns.Client
+var allowTruncated bool
 
 type NewReq struct {
 	Msg     *dns.Msg
@@ -36,7 +37,7 @@ func tryProxy(m *dns.Msg, addr string) *dns.Msg {
 	kv := llog.KV{"addr": addr, "query": m.Question[0].Name}
 	llog.Debug("calling exchange", kv)
 	aM, _, err := client.Exchange(m, addr)
-	if err != nil {
+	if err != nil && (!allowTruncated || err != dns.ErrTruncated) {
 		kv["err"] = err
 		llog.Warn("forwarding error in tryProxy", kv)
 		return nil
@@ -162,6 +163,11 @@ func main() {
 		Description: "Minimum log level to show, either debug, info, warn, error, or fatal",
 		Default:     "warn",
 	})
+	l.Add(lever.Param{
+		Name:        "--allow-truncated",
+		Description: "If we should allow truncated responses to be proxied",
+		Flag:        true,
+	})
 	l.Parse()
 
 	addr, _ := l.ParamStr("--listen-addr")
@@ -171,6 +177,8 @@ func main() {
 
 	logLevel, _ := l.ParamStr("--log-level")
 	llog.SetLevelFromString(logLevel)
+
+	allowTruncated = l.ParamFlag("--allow-truncated")
 
 	if combineGroups {
 		//combine all the servers sent into one group
@@ -193,9 +201,7 @@ func main() {
 		DialTimeout:  time.Millisecond * 100,
 		WriteTimeout: time.Millisecond * 100,
 		ReadTimeout:  time.Millisecond * time.Duration(timeout),
-		//this won't do anything until https://github.com/miekg/dns/pull/281
-		//is merged since anything over 4096 is going to be truncated
-		//UDPSize: 4096,
+		UDPSize: 4096,
 	}
 
 	handler := dns.HandlerFunc(handleRequest)

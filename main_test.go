@@ -49,6 +49,27 @@ func getWriter() *Writer {
 	return &Writer{make(chan *dns.Msg, 1)}
 }
 
+func startServer(t *T) (*dns.Server, string) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.Nil(t, err)
+	server := &dns.Server{PacketConn: pc}
+
+	sCh := make(chan bool)
+	server.NotifyStartedFunc = func() {
+		sCh <- true
+	}
+
+	go func() {
+		server.ActivateAndServe()
+		//once Shutdown is called on the server, we need to close pc
+		pc.Close()
+	}()
+
+	//block until the server is started
+	<-sCh
+	return server, pc.LocalAddr().String()
+}
+
 func Test(t *T) {
 	m1 := new(dns.Msg)
 	m1.SetQuestion(testDomain, dns.TypeA)
@@ -192,4 +213,36 @@ func TestInFlightEDns0(t *T) {
 	//edns0 response when we send one vs when we don't send one
 	assert.NotNil(t, r1.IsEdns0())
 	assert.Nil(t, r2.IsEdns0())
+}
+
+func returnTruncated(w dns.ResponseWriter, req *dns.Msg) {
+	m := new(dns.Msg)
+	m.SetReply(req)
+	m.Answer = make([]dns.RR, 1)
+	m.Answer[0] = &dns.A{Hdr: dns.RR_Header{Name: m.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 0}, A: net.ParseIP("127.0.0.1").To4()}
+	m.Truncated = true
+	w.WriteMsg(m)
+}
+
+func TestTruncated(t *T) {
+	dns.HandleFunc(testDomain, returnTruncated)
+	defer dns.HandleRemove(testDomain)
+
+	s, addr := startServer(t)
+	defer s.Shutdown()
+
+	r := new(dns.Msg)
+	r.SetQuestion(testDomain, dns.TypeA)
+	a := tryProxy(r, addr)
+	assert.Nil(t, a)
+
+	allowTruncated = true
+	defer func() {
+		allowTruncated = false
+	}()
+	r = new(dns.Msg)
+	r.SetQuestion(testDomain, dns.TypeA)
+	a = tryProxy(r, addr)
+	assert.NotNil(t, a)
+	assert.True(t, a.Truncated)
 }
