@@ -1,13 +1,16 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"time"
+
+	"strconv"
 
 	"github.com/levenlabs/go-llog"
 	"github.com/mediocregopher/lever"
 	"github.com/miekg/dns"
-	"strconv"
 )
 
 var dnsServerGroups [][]string
@@ -50,10 +53,14 @@ func tryProxy(m *dns.Msg, addr string) *dns.Msg {
 
 func queryGroup(r *dns.Msg, servers []string) *dns.Msg {
 	chs := make([]chan *dns.Msg, len(servers))
+	doneCh := make(chan struct{})
 	for i := range servers {
 		chs[i] = make(chan *dns.Msg, 1)
 		go func(ch chan *dns.Msg, addr string) {
-			ch <- tryProxy(r, addr)
+			select {
+			case ch <- tryProxy(r, addr):
+			case <-doneCh:
+			}
 		}(chs[i], servers[i])
 	}
 
@@ -63,6 +70,7 @@ func queryGroup(r *dns.Msg, servers []string) *dns.Msg {
 			break
 		}
 	}
+	close(doneCh)
 	return m
 }
 
@@ -84,22 +92,33 @@ func sendFormatError(w dns.ResponseWriter, r *dns.Msg) {
 	return
 }
 
-func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
-	kv := llog.KV{"question": "", "type": ""}
-	var ok bool
+func validateRequest(r *dns.Msg) error {
 	if len(r.Question) == 0 {
-		llog.Warn("received request with no questions", kv)
+		return errors.New("empty question set")
+	}
+	typ, ok := dns.TypeToString[r.Question[0].Qtype]
+	if !ok || typ == "None" {
+		return fmt.Errorf("invalid question type: %q", typ)
+	}
+	return nil
+}
+
+func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
+	kv := llog.KV{}
+	// Can be nil during testing
+	if raddr := w.RemoteAddr(); raddr != nil {
+		kv["srcAddr"] = raddr.String()
+	}
+
+	if err := validateRequest(r); err != nil {
+		kv["err"] = err
+		llog.Warn("invalid request", kv)
 		sendFormatError(w, r)
 		return
 	}
-	kv["type"], ok = dns.TypeToString[r.Question[0].Qtype]
-	if !ok || kv["type"] == "None" {
-		kv["qtype"] = r.Question[0].Qtype
-		llog.Warn("invalid type received", kv)
-		sendFormatError(w, r)
-		return
-	}
+
 	kv["question"] = r.Question[0].Name
+	kv["questionType"] = r.Question[0].Qtype
 
 	llog.Info("handling request", kv)
 	rr := NewReq{r, make(chan *dns.Msg)}
@@ -137,6 +156,8 @@ func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 	}
 }
 
+var version string
+
 func main() {
 	l := lever.New("struggledns", nil)
 	l.Add(lever.Param{
@@ -168,7 +189,20 @@ func main() {
 		Description: "If we should allow truncated responses to be proxied",
 		Flag:        true,
 	})
+	if version != "" {
+		l.Add(lever.Param{
+			Name:        "--version",
+			Aliases:     []string{"-v"},
+			Description: "Print version info",
+			Flag:        true,
+		})
+	}
 	l.Parse()
+
+	if l.ParamFlag("--version") {
+		fmt.Println(version)
+		return
+	}
 
 	addr, _ := l.ParamStr("--listen-addr")
 	dnsServers, _ := l.ParamStrs("--fwd-to")
@@ -201,7 +235,7 @@ func main() {
 		DialTimeout:  time.Millisecond * 100,
 		WriteTimeout: time.Millisecond * 100,
 		ReadTimeout:  time.Millisecond * time.Duration(timeout),
-		UDPSize: 4096,
+		UDPSize:      4096,
 	}
 
 	handler := dns.HandlerFunc(handleRequest)
