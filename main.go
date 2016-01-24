@@ -156,6 +156,8 @@ func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 	}
 }
 
+var version string
+
 func main() {
 	l := lever.New("struggledns", nil)
 	l.Add(lever.Param{
@@ -187,7 +189,20 @@ func main() {
 		Description: "If we should allow truncated responses to be proxied",
 		Flag:        true,
 	})
+	if version != "" {
+		l.Add(lever.Param{
+			Name:        "--version",
+			Aliases:     []string{"-v"},
+			Description: "Print version info",
+			Flag:        true,
+		})
+	}
 	l.Parse()
+
+	if l.ParamFlag("--version") {
+		fmt.Println(version)
+		return
+	}
 
 	addr, _ := l.ParamStr("--listen-addr")
 	dnsServers, _ := l.ParamStrs("--fwd-to")
