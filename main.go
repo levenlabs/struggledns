@@ -100,6 +100,10 @@ func validateRequest(r *dns.Msg) error {
 	if !ok || typ == "None" {
 		return fmt.Errorf("invalid question type: %q", typ)
 	}
+	// require at least 2 characters, for the period and another character
+	if len(r.Question) == 1 && len(r.Question[0].Name) < 2 {
+		return fmt.Errorf("invalid question name: %s", r.Question[0].Name)
+	}
 	return nil
 }
 
@@ -117,13 +121,17 @@ func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
+	start := time.Now()
 	kv["question"] = r.Question[0].Name
 	kv["questionType"] = r.Question[0].Qtype
-
 	llog.Info("handling request", kv)
+
 	rr := NewReq{r, make(chan *dns.Msg)}
 	newCh <- rr
 	m := <-rr.ReplyCh
+
+	kv["ms"] = int64(time.Since(start).Nanoseconds() / 1e6)
+
 	if m == nil {
 		llog.Warn("error handling request", kv)
 		dns.HandleFailed(w, r)
